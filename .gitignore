@@ -1,0 +1,5 @@
+venv/
+firmwares/
+firmware.bin
+rsc/
+api/
