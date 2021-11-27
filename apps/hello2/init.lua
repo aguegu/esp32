@@ -10,24 +10,25 @@ statusText[404] = "Not Found"
 local mimeTypes = {
   html='text/html',
   js='text/javascript',
-  ico='image/vnd.microsoft.icon'
+  ico='image/vnd.microsoft.icon',
+  css='text/css'
 }
+
+local hostname = 'ESP32#2'
 
 wifi.mode(wifi.STATION)
 wifi.start()
-wifi.sta.sethostname("ESP32#2")
+wifi.sta.sethostname(hostname)
 
 srv = net.createServer(net.TCP)
 
-local function genHeader(status, type, length)
+local function genHeader(status, type, length, isGz)
   local header = {
-    "HTTP/1.1 " .. tostring(status) .. " " .. statusText[status] .. "\r\n",
-    "Connection: close\r\n",
-    "X-Powered-By: nodemcu\r\n",
+    "HTTP/1.1 " .. tostring(status) .. " " .. statusText[status] .. "\r\nConnection: close\r\nX-Powered-By: nodemcu\r\n",
   }
   if status == 200 then
-    table.insert(header, "Content-Length: " .. length .. "\r\n")
-    table.insert(header, "Content-Type: " .. type .. "\r\n")
+    table.insert(header, "Content-Length: " .. length .. "\r\nContent-Type: " .. type .. "\r\n")
+    if isGz then table.insert(header, "Content-Encoding: gzip\r\n") end
   elseif status == 404 then
     table.insert(header, "Content-Length: 0\r\n")
   end
@@ -40,15 +41,13 @@ local files = file.list()
 
 srv:listen(80, function(conn)
   conn:on("receive", function (sck, req)
-    print(req)
-    print(sck)
+    print(sck, req)
 
     local _, _, method, path = string.find(req, "^(%w+) /(.*) HTTP/1\.1")
     local response = {}
 
-    if path == '' then
-      path = 'index.html'
-    end
+    path = path == '' and 'index.html' or path
+    local realpath = path .. '.gz'
 
     if path == 'api/led' then
       if method == 'GET' then
@@ -60,15 +59,13 @@ srv:listen(80, function(conn)
         response = genHeader(204)
       end
     elseif path == 'api/node' then
-      local s = node.chipid()
-      s = s .. ',' .. tostring(node.uptime())
-      s = s .. ',' .. tostring(node.heap())
+      local s = table.concat({ hostname, node.chipid(), tostring(node.uptime()), tostring(node.heap()) }, ',')
       response = genHeader(200, 'text/plain', #s)
       table.insert(response, s)
-    elseif path and file.exists(path) then
+    elseif path and file.exists(realpath) then
       local ext = string.match(path, '%.([^.]+)$')
-      response = genHeader(200, mimeTypes[ext], files[path])
-      local fd = file.open(path, 'r')
+      response = genHeader(200, mimeTypes[ext], files[realpath], true)
+      local fd = file.open(realpath, 'r')
       repeat
         local s = fd:read()
         if s then
@@ -81,15 +78,25 @@ srv:listen(80, function(conn)
     end
 
     local function send(localSocket)
-      if #response > 0 then
-        localSocket:send(table.remove(response, 1))
+      -- print('in send: ', localSocket, #response)
+      if localSocket then
+        if #response > 0 then
+          localSocket:send(table.remove(response, 1))
+        else
+          localSocket:close()
+          response = nil
+        end
       else
-        localSocket:close()
-        response = nil
+        collectgarbage()
       end
     end
 
     sck:on("sent", send)
+
+    sck:on("disconnection", function (sck, err)
+      print('in disconnection', sck, err)
+    end)
+
     send(sck)
     -- https://nodemcu.readthedocs.io/en/dev-esp32/modules/net/#example_6
   end)
